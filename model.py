@@ -59,7 +59,7 @@ class FeedForward(nn.Module):
         super().__init__() 
         self.net = nn.Sequential(
             nn.Linear(config.n_embd, 4 * config.n_embd), 
-            nn.ReLU(), 
+            nn.GELU(approximate='tanh'), 
             nn.Linear(4 * config.n_embd, config.n_embd), 
             nn.Dropout(config.dropout)      
         )
