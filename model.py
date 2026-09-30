@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-import torch 
+import math
+import torch
 import torch.nn as nn 
 from torch.nn import functional as F 
 
@@ -7,49 +8,48 @@ from torch.nn import functional as F
 
 @dataclass
 class GPTConfig:
-    block_size: int = 256
+    # GPT-2 124M geometry
+    block_size: int = 1024
     vocab_size: int = 50257
-    n_layer: int = 6
-    n_head: int = 6
-    n_embd: int = 384
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
     dropout: float = 0.2
 
-class Head(nn.Module): 
-    # ONE head of attention 
-
-    def  __init__(self, config, head_size):
-        super().__init__() 
-        self.head_size = head_size
-        self.key = nn.Linear(config.n_embd, head_size, bias=False)
-        self.query = nn.Linear(config.n_embd, head_size, bias=False)    
-        self.value = nn.Linear(config.n_embd, head_size, bias=False)
-        self.dropout = nn.Dropout(config.dropout)
-        self.register_buffer('tril', torch.tril(torch.ones(config.block_size, config.block_size))) # lower triangular matrix
-
-    def forward(self,  x): 
-        B, T, C = x.shape 
-        k = self.key(x)   # (B, T, head_size)
-        q = self.query(x) # (B, T, head_size)
-        # compute attention scores
-        wei = q @ k.transpose(-2, -1) * self.head_size**-0.5 # (B, T, head_size) @ (B, head_size, T
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
-        wei = F.softmax(wei, dim=-1) # (B, T, T)
-        wei = self.dropout(wei)
-        v = self.value(x) # (B, T, head_size)
-        out = wei @ v # (B, T, head_size)
-        return out
-
-class MultiHeadAttention(nn.Module): 
-    # multiple heads of self-attention in parallel 
+class MultiHeadAttention(nn.Module):
+    # all heads of self-attention in parallel, in one matmul
 
     def __init__(self, config):
         super().__init__()
-        self.heads = nn.ModuleList([Head(config, config.n_embd // config.n_head) for _ in range(config.n_head)])
+        assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd) # key, query, value for ALL heads at once (bias to match GPT-2)
         self.proj = nn.Linear(config.n_embd, config.n_embd)
+        self.proj.NANOGPT_SCALE_INIT = 1
+        self.attn_dropout = nn.Dropout(config.dropout)
         self.dropout = nn.Dropout(config.dropout)
+        # (1, 1, block_size, block_size) so it broadcasts over batch and head dims
+        self.register_buffer('tril', torch.tril(torch.ones(config.block_size, config.block_size))
+                                          .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
-        out = torch.cat([h(x) for h in self.heads], dim=-1) # concatenate all head outputs
+        B, T, C = x.shape
+        hs = C // self.n_head # head_size
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2) # one matmul -> 3 x (B, T, C)
+        # split the channel dim into heads and move heads next to batch, so the
+        # matmuls below are batched over (B, n_head) instead of looped per head
+        q = q.view(B, T, self.n_head, hs).transpose(1, 2) # (B, n_head, T, hs)
+        k = k.view(B, T, self.n_head, hs).transpose(1, 2) # (B, n_head, T, hs)
+        v = v.view(B, T, self.n_head, hs).transpose(1, 2) # (B, n_head, T, hs)
+
+        wei = q @ k.transpose(-2, -1) * hs**-0.5 # (B, n_head, T, T)
+        wei = wei.masked_fill(self.tril[:, :, :T, :T] == 0, float('-inf'))
+        wei = F.softmax(wei, dim=-1)
+        wei = self.attn_dropout(wei)
+        out = wei @ v # (B, n_head, T, hs)
+
+        out = out.transpose(1, 2).contiguous().view(B, T, C) # re-assemble heads side by side
         out = self.proj(out) # project back to original embedding size
         out = self.dropout(out)
         return out
@@ -63,6 +63,8 @@ class FeedForward(nn.Module):
             nn.Linear(4 * config.n_embd, config.n_embd), 
             nn.Dropout(config.dropout)      
         )
+        self.net[2].NANOGPT_SCALE_INIT = 1
+
 
     def forward(self, x):
         return self.net(x)
@@ -85,12 +87,26 @@ class Block(nn.Module):
 class GPT(nn.Module): 
     def __init__(self, config):
         super().__init__()
+        self.config = config
         self.block_size = config.block_size
         self.token_embedding_table = nn.Embedding(config.vocab_size, config.n_embd)
         self.position_embedding_table = nn.Embedding(config.block_size, config.n_embd)
         self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(config.n_embd) # final layer norm
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # GPT-2 has no bias here
+        self.lm_head.weight = self.token_embedding_table.weight # tie weights
+        self.apply(self._init_weights) # initialize weights
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std = std * (1 / math.sqrt(2 * self.config.n_layer))
+            nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
@@ -99,7 +115,7 @@ class GPT(nn.Module):
         x = tok_emb + pos_emb # (B, T, C)
         x = self.blocks(x) # (B, T, C)
         x = self.ln_f(x) # (B, T, C)
-        logits = self.lm_head(x) # (B, T, vocab_size)
+        logits = self.lm_head(x) # (B, T, vocab_size) this is just a matmul 
 
         if targets is None:
             loss = None

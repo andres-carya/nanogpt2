@@ -15,11 +15,11 @@ eval_interval = 500
 eval_iters = 200
 learning_rate = 3e-4
 
-# model config -- shrunk; real run is block_size=256, n_layer=6, n_head=6, n_embd=384 
-block_size = 32
-n_layer = 2
-n_head = 2
-n_embd = 64
+# model config -- GPT-2 124M geometry
+block_size = 1024
+n_layer = 12
+n_head = 12
+n_embd = 768
 dropout = 0.2
 
 ckpt_path = 'out/gpt.pth'
