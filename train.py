@@ -16,12 +16,8 @@ eval_interval = 500
 eval_iters = 200
 learning_rate = 3e-4
 
-# model config -- GPT-2 124M geometry
-block_size = 1024
-n_layer = 12
-n_head = 12
-n_embd = 768
-dropout = 0.2
+# model geometry lives in model.py's GPTConfig -- override it only for smoke
+model_overrides = {}
 
 ckpt_path = 'out/gpt.pth'
 
@@ -31,10 +27,7 @@ if args.smoke:
     max_steps = 20
     eval_interval = 10
     eval_iters = 10
-    block_size = 32
-    n_layer = 2
-    n_head = 2
-    n_embd = 64
+    model_overrides = dict(block_size=32, n_layer=2, n_head=2, n_embd=64)
     ckpt_path = 'out/gpt_smoke.pth'  # don't clobber a real checkpoint
     print("[smoke] tiny config, 20 steps")
 
@@ -52,7 +45,7 @@ train_data = data[:n]
 val_data = data[n:]
 
 #model 
-config = GPTConfig(vocab_size=vocab_size, block_size=block_size, n_layer=n_layer, n_head=n_head, n_embd=n_embd, dropout=dropout)
+config = GPTConfig(vocab_size=vocab_size, **model_overrides)
 model = GPT(config).to(device)
 print(config)
 print(f"Model has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
