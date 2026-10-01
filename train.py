@@ -2,11 +2,14 @@ import argparse
 import os 
 import torch 
 import tiktoken
+import time
 from model import GPT, GPTConfig
 
+# command --smoke line 
 parser = argparse.ArgumentParser()
 parser.add_argument('--smoke', action='store_true',
                     help='tiny end-to-end run (seconds) to prove the pipeline works')
+parser.add_argument('--steps', type=int, default=None)
 args = parser.parse_args()
 
 # train config 
@@ -15,6 +18,7 @@ max_steps = 5000
 eval_interval = 500
 eval_iters = 200
 learning_rate = 3e-4
+log_interval = 10
 
 # model geometry lives in model.py's GPTConfig -- override it only for smoke
 model_overrides = {}
@@ -80,11 +84,25 @@ for step in range(max_steps):
         losses = estimate_loss()
         print(f"step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    t0 = time.perf_counter()
+        
+
     xb, yb = get_batch('train')
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    t1 = time.perf_counter()
+
+    if step % log_interval == 0 or step == max_steps - 1:
+        dt = t1 - t0
+        tokens = config.block_size * batch_size
+        tps = tokens / dt
+        print(f"step {step}: loss {loss.item():.4f}, tps {tps:.2f}")
 
 os.makedirs('out', exist_ok=True)
 torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'config': config, 'step': max_steps}, ckpt_path)
