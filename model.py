@@ -153,6 +153,37 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+    # the four released GPT-2 sizes; all share block_size 1024 and vocab 50257
+    GEOMETRY = {
+        'gpt2':        dict(n_layer=12, n_head=12, n_embd=768),
+        'gpt2-medium': dict(n_layer=24, n_head=16, n_embd=1024),
+        'gpt2-large':  dict(n_layer=36, n_head=20, n_embd=1280),
+        'gpt2-xl':     dict(n_layer=48, n_head=25, n_embd=1600),
+    }
+
+    @classmethod
+    def from_pretrained(cls, model_type='gpt2', dropout=0.0):
+        # dropout defaults to 0 -- these weights are usually loaded to generate
+        # from, not to train. Pass a value if you mean to fine-tune.
+        from transformers import GPT2LMHeadModel
+        assert model_type in cls.GEOMETRY, f"unknown model_type {model_type!r}, expected one of {list(cls.GEOMETRY)}"
+        config = GPTConfig(block_size=1024, vocab_size=50257, dropout=dropout, **cls.GEOMETRY[model_type])
+        model = cls(config)
+        sd_hf = GPT2LMHeadModel.from_pretrained(model_type).state_dict()
+        sd_me = model.state_dict()
+        with torch.no_grad():
+            for key in sd_me: 
+                their = hf_key(key)
+                if their is None:
+                    continue 
+                elif their.endswith(_TRANSPOSED):
+                    source = sd_hf[their].t()
+                else:
+                    source = sd_hf[their]
+                assert sd_me[key].shape == source.shape
+                sd_me[key].copy_(source)
+        return model 
+
     def forward(self, idx, targets=None):
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx) # (B, T, C)
