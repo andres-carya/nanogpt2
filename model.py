@@ -1,10 +1,55 @@
 from dataclasses import dataclass
 import math
+import re
 import torch
-import torch.nn as nn 
-from torch.nn import functional as F 
+import torch.nn as nn
+from torch.nn import functional as F
 
-# classes go here 
+# our module name -> the name HuggingFace GPT-2 uses for the same thing.
+# theirs are transliterated from OpenAI's original TF code: wte = word token
+# embedding, wpe = word position embedding, h = the stack of blocks, and the
+# c_ prefix is a fossil of that code using Conv1D instead of Linear.
+_TOP_LEVEL = {
+    'token_embedding_table': 'transformer.wte',
+    'position_embedding_table': 'transformer.wpe',
+    'ln_f': 'transformer.ln_f',
+    'lm_head': 'lm_head',                  # not under transformer., and tied to wte
+}
+_IN_BLOCK = {
+    'ln1': 'ln_1',
+    'ln2': 'ln_2',
+    'sa.c_attn': 'attn.c_attn',
+    'sa.proj': 'attn.c_proj',
+    'ffwd.net.0': 'mlp.c_fc',              # numbered because ffwd.net is an nn.Sequential
+    'ffwd.net.2': 'mlp.c_proj',
+}
+
+_TRANSPOSED = (
+    'attn.c_attn.weight',
+    'attn.c_proj.weight',
+    'mlp.c_fc.weight',
+    'mlp.c_proj.weight',
+)
+
+
+
+def hf_key(mine):
+    # given a key from this model's state_dict, return the matching key in a
+    # HuggingFace GPT-2 state_dict, or None if it has no counterpart there.
+    m = re.fullmatch(r'blocks\.(\d+)\.(.+)\.(weight|bias)', mine)
+    if m:
+        i, module, param = m.groups()
+        if module in _IN_BLOCK:
+            return f'transformer.h.{i}.{_IN_BLOCK[module]}.{param}'
+        return None
+    m = re.fullmatch(r'(.+)\.(weight|bias)', mine)
+    if m:
+        module, param = m.groups()
+        if module in _TOP_LEVEL:
+            return f'{_TOP_LEVEL[module]}.{param}'
+    return None                            # e.g. blocks.N.sa.tril -- a derived mask, nothing to copy
+
+# classes go here
 
 @dataclass
 class GPTConfig:

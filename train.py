@@ -1,6 +1,7 @@
 import argparse
 import os 
 import torch 
+import tiktoken
 from model import GPT, GPTConfig
 
 parser = argparse.ArgumentParser()
@@ -9,7 +10,7 @@ parser.add_argument('--smoke', action='store_true',
 args = parser.parse_args()
 
 # train config 
-batch_size = 64
+batch_size = 6
 max_steps = 5000
 eval_interval = 500
 eval_iters = 200
@@ -42,14 +43,10 @@ torch.manual_seed(1337)
 
 # data 
 text = open('data/input.txt', 'r').read() 
-chars = sorted(set(text))
-vocab_size = len(chars)
-stoi = { ch:i for i,ch in enumerate(chars) }
-itos = { i:ch for i,ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s]
-decode = lambda l: ''.join([itos[i] for i in l])
+enc = tiktoken.get_encoding('gpt2')
+vocab_size = enc.n_vocab
 
-data = torch.tensor(encode(text), dtype=torch.long)
+data = torch.tensor(enc.encode(text), dtype=torch.long)
 n = int(0.9*len(data))
 train_data = data[:n]
 val_data = data[n:]

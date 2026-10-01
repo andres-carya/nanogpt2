@@ -7,6 +7,5 @@ data/
 out/
 *.pt
 *.bin
-*.txt
 wandb/
 *.pth
