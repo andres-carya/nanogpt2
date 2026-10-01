@@ -1,4 +1,7 @@
-torch
+# torch is intentionally NOT listed -- install it separately.
+# The right wheel depends on your hardware: the RunPod PyTorch template already
+# ships a CUDA-matched build, and locally you want the MPS/CPU one. Listing it
+# here invites pip to replace a working install with a mismatched one.
 numpy
 tiktoken
 transformers
