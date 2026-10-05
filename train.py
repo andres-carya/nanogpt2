@@ -21,6 +21,7 @@ learning_rate = 3e-4
 weight_decay = 0.1
 betas = (0.9, 0.95)
 log_interval = 10
+grad_clip = 1.0
 
 # model geometry lives in model.py's GPTConfig -- override it only for smoke
 model_overrides = {}
@@ -115,6 +116,7 @@ for step in range(max_steps):
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
     if device == 'cuda':
         torch.cuda.synchronize()
@@ -124,7 +126,7 @@ for step in range(max_steps):
         dt = t1 - t0
         tokens = config.block_size * batch_size
         tps = tokens / dt
-        print(f"step {step}: loss {loss.item():.4f}, tps {tps:.2f}")
+        print(f"step {step}: loss {loss.item():.4f}, tps {tps:.2f}, norm {norm.item():.4f}")
 
 os.makedirs('out', exist_ok=True)
 torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'config': config, 'step': max_steps}, ckpt_path)
