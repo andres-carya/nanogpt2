@@ -18,6 +18,8 @@ max_steps = 5000
 eval_interval = 500
 eval_iters = 200
 learning_rate = 3e-4
+weight_decay = 0.1
+betas = (0.9, 0.95)
 log_interval = 10
 
 # model geometry lives in model.py's GPTConfig -- override it only for smoke
@@ -53,7 +55,27 @@ config = GPTConfig(vocab_size=vocab_size, **model_overrides)
 model = GPT(config).to(device)
 print(config)
 print(f"Model has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+#build list of parameters 
+
+# get all the parameters that require gradients
+params = [p for p in model.parameters() if p.requires_grad]
+
+# put into groups 
+decay_params = [p for p in params if p.dim() >= 2]
+print('len(decay_params):', len(decay_params))
+print('parameters:  ', sum(p.numel() for p in decay_params))
+
+non_decay_params = [p for p in params if p.dim() < 2]
+print('len(non_decay_params):', len(non_decay_params))
+print('parameters:  ', sum(p.numel() for p in non_decay_params))
+
+# create the optimizer
+optimizer = torch.optim.AdamW([
+    {'params': decay_params, 'weight_decay': weight_decay},
+    {'params': non_decay_params, 'weight_decay': 0.0}
+], lr=learning_rate, betas=betas, eps=1e-8)
+
 
 def get_batch(split):
     d = train_data if split == 'train' else val_data
