@@ -1,4 +1,5 @@
 import argparse
+import math
 import os 
 import torch 
 import tiktoken
@@ -10,6 +11,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--smoke', action='store_true',
                     help='tiny end-to-end run (seconds) to prove the pipeline works')
 parser.add_argument('--steps', type=int, default=None)
+parser.add_argument('--plot-lr', action='store_true',
+                    help='draw the LR schedule and exit, without training')
 args = parser.parse_args()
 
 # train config 
@@ -22,6 +25,9 @@ weight_decay = 0.1
 betas = (0.9, 0.95)
 log_interval = 10
 grad_clip = 1.0
+max_lr = 6e-4
+min_lr = 0.1 * max_lr
+warmup_frac = 0.05
 
 # model geometry lives in model.py's GPTConfig -- override it only for smoke
 model_overrides = {}
@@ -100,9 +106,61 @@ def estimate_loss():
     model.train()
     return out
 
+def get_lr(step):
+    warmup_steps = int(warmup_frac * max_steps)
+    if step < warmup_steps:
+        return max_lr * (step + 1)/ warmup_steps
+    elif step > max_steps: 
+        return min_lr
+    else: 
+        decay_ratio = (step - warmup_steps) / (max_steps - warmup_steps)
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (max_lr - min_lr)
 
-#train 
+def plot_lr(get_lr, max_steps, warmup_steps, width=72, height=18):
+    # sample the schedule at `width` evenly spaced steps and draw it as blocks
+    xs = [round(i * (max_steps - 1) / (width - 1)) for i in range(width)]
+    ys = [get_lr(x) for x in xs]
+    lo, hi = min(ys), max(ys)
+    span = (hi - lo) or 1.0
+    blocks = ' ▁▂▃▄▅▆▇█'
+
+    print(f"\n  LR schedule   peak {hi:.2e}   floor {lo:.2e}   "
+          f"warmup {warmup_steps}   total {max_steps}\n")
+    for row in range(height, 0, -1):
+        line = ''
+        for y in ys:
+            frac = (y - lo) / span * height
+            if frac >= row:
+                line += '█'
+            elif frac > row - 1:
+                line += blocks[int((frac - (row - 1)) * 8)]
+            else:
+                line += ' '
+        print(f"  {lo + span * (row - 0.5) / height:8.2e} │{line}")
+    print(f"  {'':8s} └{'─' * width}")
+
+    axis = [' '] * width
+    for t in [0, max_steps // 4, max_steps // 2, 3 * max_steps // 4]:
+        col = round(t / (max_steps - 1) * (width - 1))
+        for j, ch in enumerate(str(t)):
+            if col + j < width:
+                axis[col + j] = ch
+    last = str(max_steps - 1)
+    for j, ch in enumerate(last):
+        axis[width - len(last) + j] = ch
+    print(f"  {'':8s}  {''.join(axis)}")
+    print(f"\n  peak {hi:.3e} around step {xs[ys.index(hi)]}   "
+          f"ends at {ys[-1]:.3e} = {ys[-1]/hi*100:.0f}% of peak\n")
+
+if args.plot_lr:
+    plot_lr(get_lr, max_steps, int(warmup_frac * max_steps))
+    raise SystemExit
+
+#train
 for step in range(max_steps):
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = get_lr(step)
     if step % eval_interval == 0 or step == max_steps - 1:
         losses = estimate_loss()
         print(f"step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
