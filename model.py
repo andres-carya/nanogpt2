@@ -72,11 +72,9 @@ class MultiHeadAttention(nn.Module):
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd) # key, query, value for ALL heads at once (bias to match GPT-2)
         self.proj = nn.Linear(config.n_embd, config.n_embd)
         self.proj.NANOGPT_SCALE_INIT = 1
-        self.attn_dropout = nn.Dropout(config.dropout)
+        self.attn_dropout = nn.Dropout(config.dropout)  # kept only to hold .p for SDPA
         self.dropout = nn.Dropout(config.dropout)
-        # (1, 1, block_size, block_size) so it broadcasts over batch and head dims
-        self.register_buffer('tril', torch.tril(torch.ones(config.block_size, config.block_size))
-                                          .view(1, 1, config.block_size, config.block_size))
+        # no causal mask buffer: scaled_dot_product_attention(is_causal=True) masks internally
 
     def forward(self, x):
         B, T, C = x.shape
@@ -88,14 +86,11 @@ class MultiHeadAttention(nn.Module):
         k = k.view(B, T, self.n_head, hs).transpose(1, 2) # (B, n_head, T, hs)
         v = v.view(B, T, self.n_head, hs).transpose(1, 2) # (B, n_head, T, hs)
 
-        wei = q @ k.transpose(-2, -1) * hs**-0.5 # (B, n_head, T, T)
-        wei = wei.masked_fill(self.tril[:, :, :T, :T] == 0, float('-inf'))
-        wei = F.softmax(wei, dim=-1)
-        wei = self.attn_dropout(wei)
-        out = wei @ v # (B, n_head, T, hs)
+        # flash attention 
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p = self.attn_dropout.p if self.training else 0)
 
         out = out.transpose(1, 2).contiguous().view(B, T, C) # re-assemble heads side by side
-        out = self.proj(out) # project back to original embedding size
+        out = self.proj(out) # project back to original embedding size  
         out = self.dropout(out)
         return out
 
