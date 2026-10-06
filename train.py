@@ -171,7 +171,11 @@ for step in range(max_steps):
         
 
     xb, yb = get_batch('train')
-    logits, loss = model(xb, yb)
+
+    #bf16 on forward pass only
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(xb, yb)
+        
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
