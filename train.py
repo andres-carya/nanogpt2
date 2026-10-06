@@ -13,6 +13,8 @@ parser.add_argument('--smoke', action='store_true',
 parser.add_argument('--steps', type=int, default=None)
 parser.add_argument('--plot-lr', action='store_true',
                     help='draw the LR schedule and exit, without training')
+parser.add_argument('--compile', action='store_true',
+                    help='compile the model')
 args = parser.parse_args()
 
 # train config 
@@ -60,6 +62,14 @@ val_data = data[n:]
 #model 
 config = GPTConfig(vocab_size=vocab_size, **model_overrides)
 model = GPT(config).to(device)
+
+#reference for compile 
+raw_model = model
+
+#compile
+if args.compile:
+    model = torch.compile(model)
+
 print(config)
 print(f"Model has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
 
@@ -191,6 +201,6 @@ for step in range(max_steps):
         print(f"step {step}: loss {loss.item():.4f}, tps {tps:.2f}, norm {norm.item():.4f}")
 
 os.makedirs('out', exist_ok=True)
-torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'config': config, 'step': max_steps}, ckpt_path)
+torch.save({'model': raw_model.state_dict(), 'optimizer': optimizer.state_dict(), 'config': config, 'step': max_steps}, ckpt_path)
 print (f"Training complete. Model saved to {ckpt_path}")
 
