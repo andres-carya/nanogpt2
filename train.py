@@ -27,6 +27,7 @@ weight_decay = 0.1
 betas = (0.9, 0.95)
 log_interval = 10
 grad_clip = 1.0
+grad_accumulation_steps = 1
 max_lr = 6e-4
 min_lr = 0.1 * max_lr
 warmup_frac = 0.05
@@ -178,27 +179,31 @@ for step in range(max_steps):
     if device == 'cuda':
         torch.cuda.synchronize()
     t0 = time.perf_counter()
-        
-
-    xb, yb = get_batch('train')
-
-    #bf16 on forward pass only
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(xb, yb)
-
+  
+    #Gradient accumulation
     optimizer.zero_grad(set_to_none=True)
-    loss.backward()
+    loss_accum = 0.0
+    for micro in range(grad_accumulation_steps):
+        xb, yb = get_batch('train')
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(xb, yb)
+        loss = loss / grad_accumulation_steps
+        loss_accum += loss.item()
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
+
+
+   
     if device == 'cuda':
         torch.cuda.synchronize()
     t1 = time.perf_counter()
 
     if step % log_interval == 0 or step == max_steps - 1:
         dt = t1 - t0
-        tokens = config.block_size * batch_size
+        tokens = config.block_size * batch_size * grad_accumulation_steps
         tps = tokens / dt
-        print(f"step {step}: loss {loss.item():.4f}, tps {tps:.2f}, norm {norm.item():.4f}")
+        print(f"step {step}: loss {loss_accum:.4f}, tps {tps:.2f}, norm {norm.item():.4f}")
 
 os.makedirs('out', exist_ok=True)
 torch.save({'model': raw_model.state_dict(), 'optimizer': optimizer.state_dict(), 'config': config, 'step': max_steps}, ckpt_path)
