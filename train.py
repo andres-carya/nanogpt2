@@ -12,7 +12,10 @@ from model import GPT, GPTConfig
 parser = argparse.ArgumentParser()
 parser.add_argument('--smoke', action='store_true',
                     help='tiny end-to-end run (seconds) to prove the pipeline works')
-parser.add_argument('--steps', type=int, default=None)
+parser.add_argument('--steps', type=int, default=None,
+                    help='override max_steps')
+parser.add_argument('--batch-size', type=int, default=None,
+                    help='override batch_size, e.g. --batch-size 32 when hunting for the memory limit')
 parser.add_argument('--plot-lr', action='store_true',
                     help='draw the LR schedule and exit, without training')
 parser.add_argument('--compile', action='store_true',
@@ -44,7 +47,7 @@ ckpt_path = 'out/gpt.pth'
 
 if args.smoke:
     # cheap enough to run every time you touch the training loop
-    batch_size = 8
+    batch_size = 6
     max_steps = 20
     eval_interval = 10
     eval_iters = 10
@@ -54,6 +57,9 @@ if args.smoke:
 
 if args.steps is not None:
     max_steps = args.steps
+
+if args.batch_size is not None:
+    batch_size = args.batch_size
 
 
 
