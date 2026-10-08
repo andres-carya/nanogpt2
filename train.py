@@ -4,6 +4,7 @@ import os
 import torch 
 import tiktoken
 import time
+import numpy as np
 from model import GPT, GPTConfig
 
 # command --smoke line 
@@ -50,15 +51,13 @@ if args.smoke:
 device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
 torch.manual_seed(1337)
 
-# data 
-text = open('data/input.txt', 'r').read() 
+# data -- pre-tokenised by prepare_data.py, memory-mapped so the dataset
+# never has to fit in RAM
 enc = tiktoken.get_encoding('gpt2')
 vocab_size = enc.n_vocab
 
-data = torch.tensor(enc.encode(text), dtype=torch.long)
-n = int(0.9*len(data))
-train_data = data[:n]
-val_data = data[n:]
+train_data = np.memmap('data/train.bin', dtype=np.uint16, mode='r')
+val_data = np.memmap('data/val.bin', dtype=np.uint16, mode='r')
 
 #model 
 config = GPTConfig(vocab_size=vocab_size, **model_overrides)
@@ -98,8 +97,9 @@ optimizer = torch.optim.AdamW([
 def get_batch(split):
     d = train_data if split == 'train' else val_data
     ix = torch.randint(len(d) - config.block_size, (batch_size,))
-    x = torch.stack([d[i:i+config.block_size] for i in ix])
-    y = torch.stack([d[i+1:i+config.block_size+1] for i in ix])
+    # uint16 on disk -> int64 for the embedding lookup, one batch at a time
+    x = torch.stack([torch.from_numpy(d[i:i+config.block_size].astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy(d[i+1:i+config.block_size+1].astype(np.int64)) for i in ix])
     x, y = x.to(device), y.to(device)
     return x, y
 
