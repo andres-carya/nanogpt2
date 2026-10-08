@@ -5,6 +5,7 @@ import torch
 import tiktoken
 import time
 import numpy as np
+import wandb
 from model import GPT, GPTConfig
 
 # command --smoke line 
@@ -16,12 +17,15 @@ parser.add_argument('--plot-lr', action='store_true',
                     help='draw the LR schedule and exit, without training')
 parser.add_argument('--compile', action='store_true',
                     help='compile the model')
+parser.add_argument('--wandb', action='store_true',
+                    help='log training metrics to Weights & Biases')
 args = parser.parse_args()
 
 # train config 
 batch_size = 6
 max_steps = 5000
 eval_interval = 500
+checkpoint_interval = 500
 eval_iters = 200
 learning_rate = 3e-4
 weight_decay = 0.1
@@ -48,6 +52,11 @@ if args.smoke:
     ckpt_path = 'out/gpt_smoke.pth'  # don't clobber a real checkpoint
     print("[smoke] tiny config, 20 steps")
 
+if args.steps is not None:
+    max_steps = args.steps
+
+
+
 device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
 torch.manual_seed(1337)
 
@@ -72,6 +81,22 @@ if args.compile:
 
 print(config)
 print(f"Model has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
+
+if args.wandb:
+    wandb.init(project="gpt-train", config={
+        "batch_size": batch_size,
+        "max_steps": max_steps,
+        "max_lr": max_lr,
+        "min_lr": min_lr,
+        "warmup_frac": warmup_frac,
+        "weight_decay": weight_decay,
+        "grad_clip": grad_clip,
+        "grad_accumulation_steps": grad_accumulation_steps,
+        "n_layer": config.n_layer,
+        "n_head": config.n_head,
+        "n_embd": config.n_embd,
+        "block_size": config.block_size,
+    })
 
 #build list of parameters 
 
@@ -168,6 +193,8 @@ if args.plot_lr:
     plot_lr(get_lr, max_steps, int(warmup_frac * max_steps))
     raise SystemExit
 
+os.makedirs('out', exist_ok=True)
+
 #train
 for step in range(max_steps):
     for param_group in optimizer.param_groups:
@@ -175,6 +202,8 @@ for step in range(max_steps):
     if step % eval_interval == 0 or step == max_steps - 1:
         losses = estimate_loss()
         print(f"step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    if args.wandb:  
+            wandb.log({'train_loss': losses['train'], 'val_loss': losses['val']}, step=step)
 
     if device == 'cuda':
         torch.cuda.synchronize()
@@ -192,9 +221,7 @@ for step in range(max_steps):
         loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
-
-
-   
+    
     if device == 'cuda':
         torch.cuda.synchronize()
     t1 = time.perf_counter()
@@ -204,8 +231,13 @@ for step in range(max_steps):
         tokens = config.block_size * batch_size * grad_accumulation_steps
         tps = tokens / dt
         print(f"step {step}: loss {loss_accum:.4f}, tps {tps:.2f}, norm {norm.item():.4f}")
+        if args.wandb:
+            wandb.log({'lr': get_lr(step), 'loss': loss_accum, 'dt': dt, 'tps': tps, 'norm': norm.item()}, step=step)
 
-os.makedirs('out', exist_ok=True)
-torch.save({'model': raw_model.state_dict(), 'optimizer': optimizer.state_dict(), 'config': config, 'step': max_steps}, ckpt_path)
-print (f"Training complete. Model saved to {ckpt_path}")
+    if step % checkpoint_interval == 0 or step == max_steps - 1:
+        torch.save({'model': raw_model.state_dict(), 'optimizer': optimizer.state_dict(), 'config': config, 'step': step}, ckpt_path)
+        print(f"Checkpoint saved to {ckpt_path}")
 
+print (f"Training complete.")
+if args.wandb:
+    wandb.finish()
