@@ -20,7 +20,7 @@ model = GPT(ck['config'])
 model.to(device)
 model.load_state_dict(ck['model'])
 model.eval()
-    
+
 prompt = tiktoken.get_encoding("gpt2").encode(args.prompt)
 prompt = torch.tensor(prompt, dtype=torch.long, device=device)
 prompt = prompt.view(1, -1)

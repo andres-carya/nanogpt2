@@ -31,3 +31,26 @@ results
 │ batch 32, compile             │ 80,000 │ 59.7   │ 40% │
 └───────────────────────────────┴────────┴────────┴─────┘
 
+FINAL RUN: 
+
+wandb:       loss ________________________________________
+wandb:         lr ________________________________________
+wandb:       norm ________________________________________
+wandb:        tps ________________________________________
+wandb: train_loss ________________________________________
+wandb:   val_loss ________________________________________
+wandb: 
+wandb: Run summary:
+wandb:         dt 0.41573
+wandb:       loss 0.02185
+wandb:         lr 6e-05
+wandb:       norm 0.11353
+wandb:        tps 78820.81236
+wandb: train_loss 0.01678
+wandb:   val_loss 9.97301
+wandb: 
+wandb: __ View run comic-leaf-2 at: https://wandb.ai/carya/gpt-train/runs/lsqpuz8c
+wandb: __ View project at: https://wandb.ai/carya/gpt-train
+wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./wandb/run-20261009_000108-lsqpuz8c/logs
+
