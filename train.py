@@ -6,7 +6,28 @@ import tiktoken
 import time
 import numpy as np
 import wandb
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from model import GPT, GPTConfig
+
+#check if ddp is available
+ddp = int(os.environ.get('RANK', -1)) != -1
+
+if ddp:
+    dist.init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0
+
+else: 
+    ddp_rank, ddp_local_rank, ddp_world_size = 0, 0, 1
+    device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
+    master_process = True
+
+device_type = 'cuda' if 'cuda' in device else device
 
 # command --smoke line 
 parser = argparse.ArgumentParser()
@@ -53,7 +74,8 @@ if args.smoke:
     eval_iters = 10
     model_overrides = dict(block_size=32, n_layer=2, n_head=2, n_embd=64)
     ckpt_path = 'out/gpt_smoke.pth'  # don't clobber a real checkpoint
-    print("[smoke] tiny config, 20 steps")
+    if master_process:
+        print("[smoke] tiny config, 20 steps")
 
 if args.steps is not None:
     max_steps = args.steps
@@ -61,9 +83,6 @@ if args.steps is not None:
 if args.batch_size is not None:
     batch_size = args.batch_size
 
-
-
-device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
 torch.manual_seed(1337)
 
 # data -- pre-tokenised by prepare_data.py, memory-mapped so the dataset
@@ -85,10 +104,16 @@ raw_model = model
 if args.compile:
     model = torch.compile(model)
 
-print(config)
-print(f"Model has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
 
-if args.wandb:
+torch.manual_seed(1337 + ddp_rank)  # each process gets a different seed, but the same across restarts
+
+if master_process:
+    print(config)
+    print(f"Model has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
+
+if args.wandb and master_process:
     wandb.init(project="gpt-train", config={
         "batch_size": batch_size,
         "max_steps": max_steps,
@@ -111,12 +136,14 @@ params = [p for p in model.parameters() if p.requires_grad]
 
 # put into groups 
 decay_params = [p for p in params if p.dim() >= 2]
-print('len(decay_params):', len(decay_params))
-print('parameters:  ', sum(p.numel() for p in decay_params))
+if master_process:
+    print('len(decay_params):', len(decay_params))
+    print('parameters:  ', sum(p.numel() for p in decay_params))
 
 non_decay_params = [p for p in params if p.dim() < 2]
-print('len(non_decay_params):', len(non_decay_params))
-print('parameters:  ', sum(p.numel() for p in non_decay_params))
+if master_process:
+    print('len(non_decay_params):', len(non_decay_params))
+    print('parameters:  ', sum(p.numel() for p in non_decay_params))
 
 # create the optimizer
 optimizer = torch.optim.AdamW([
@@ -142,7 +169,7 @@ def estimate_loss():
         losses = torch.zeros(eval_iters, device=device)
         for k in range(eval_iters):
             X, Y = get_batch(split)
-            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 logits, loss = model(X, Y)
             losses[k] = loss.detach()
         out[split] = losses.mean()
@@ -168,7 +195,8 @@ def plot_lr(get_lr, max_steps, warmup_steps, width=72, height=18):
     span = (hi - lo) or 1.0
     blocks = ' ▁▂▃▄▅▆▇█'
 
-    print(f"\n  LR schedule   peak {hi:.2e}   floor {lo:.2e}   "
+    if master_process: 
+        print(f"\n  LR schedule   peak {hi:.2e}   floor {lo:.2e}   "
           f"warmup {warmup_steps}   total {max_steps}\n")
     for row in range(height, 0, -1):
         line = ''
@@ -180,8 +208,9 @@ def plot_lr(get_lr, max_steps, warmup_steps, width=72, height=18):
                 line += blocks[int((frac - (row - 1)) * 8)]
             else:
                 line += ' '
-        print(f"  {lo + span * (row - 0.5) / height:8.2e} │{line}")
-    print(f"  {'':8s} └{'─' * width}")
+        if master_process:
+            print(f"  {lo + span * (row - 0.5) / height:8.2e} │{line}")
+            print(f"  {'':8s} └{'─' * width}")
 
     axis = [' '] * width
     for t in [0, max_steps // 4, max_steps // 2, 3 * max_steps // 4]:
@@ -192,12 +221,14 @@ def plot_lr(get_lr, max_steps, warmup_steps, width=72, height=18):
     last = str(max_steps - 1)
     for j, ch in enumerate(last):
         axis[width - len(last) + j] = ch
-    print(f"  {'':8s}  {''.join(axis)}")
-    print(f"\n  peak {hi:.3e} around step {xs[ys.index(hi)]}   "
+    if master_process:
+        print(f"  {'':8s}  {''.join(axis)}")
+        print(f"\n  peak {hi:.3e} around step {xs[ys.index(hi)]}   "
           f"ends at {ys[-1]:.3e} = {ys[-1]/hi*100:.0f}% of peak\n")
 
 if args.plot_lr:
-    plot_lr(get_lr, max_steps, int(warmup_frac * max_steps))
+    if master_process:
+        plot_lr(get_lr, max_steps, int(warmup_frac * max_steps))
     raise SystemExit
 
 os.makedirs('out', exist_ok=True)
@@ -208,11 +239,12 @@ for step in range(max_steps):
         param_group['lr'] = get_lr(step)
     if step % eval_interval == 0 or step == max_steps - 1:
         losses = estimate_loss()
-        print(f"step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        if master_process:
+            print(f"step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
     if args.wandb:  
             wandb.log({'train_loss': losses['train'], 'val_loss': losses['val']}, step=step)
 
-    if device == 'cuda':
+    if device_type == 'cuda':
         torch.cuda.synchronize()
     t0 = time.perf_counter()
   
@@ -221,7 +253,7 @@ for step in range(max_steps):
     loss_accum = 0.0
     for micro in range(grad_accumulation_steps):
         xb, yb = get_batch('train')
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             logits, loss = model(xb, yb)
         loss = loss / grad_accumulation_steps
         loss_accum += loss.item()
@@ -229,7 +261,7 @@ for step in range(max_steps):
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
     
-    if device == 'cuda':
+    if device_type == 'cuda':
         torch.cuda.synchronize()
     t1 = time.perf_counter()
 
@@ -237,14 +269,17 @@ for step in range(max_steps):
         dt = t1 - t0
         tokens = config.block_size * batch_size * grad_accumulation_steps
         tps = tokens / dt
-        print(f"step {step}: loss {loss_accum:.4f}, tps {tps:.2f}, norm {norm.item():.4f}")
+        if master_process:
+            print(f"step {step}: loss {loss_accum:.4f}, tps {tps:.2f}, norm {norm.item():.4f}")
         if args.wandb:
             wandb.log({'lr': get_lr(step), 'loss': loss_accum, 'dt': dt, 'tps': tps, 'norm': norm.item()}, step=step)
 
     if step % checkpoint_interval == 0 or step == max_steps - 1:
-        torch.save({'model': raw_model.state_dict(), 'optimizer': optimizer.state_dict(), 'config': config, 'step': step}, ckpt_path)
-        print(f"Checkpoint saved to {ckpt_path}")
+        if master_process:
+            torch.save({'model': raw_model.state_dict(), 'optimizer': optimizer.state_dict(), 'config': config, 'step': step}, ckpt_path)
+            print(f"Checkpoint saved to {ckpt_path}")
 
-print (f"Training complete.")
+if master_process:
+    print(f"Training complete.")
 if args.wandb:
     wandb.finish()
