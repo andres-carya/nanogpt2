@@ -56,7 +56,7 @@ weight_decay = 0.1
 betas = (0.9, 0.95)
 log_interval = 10
 grad_clip = 1.0
-grad_accumulation_steps = 1
+total_batch_size = 524288
 max_lr = 6e-4
 min_lr = 0.1 * max_lr
 warmup_frac = 0.05
@@ -69,6 +69,7 @@ ckpt_path = 'out/gpt.pth'
 if args.smoke:
     # cheap enough to run every time you touch the training loop
     batch_size = 6
+    total_batch_size = 384
     max_steps = 20
     eval_interval = 10
     eval_iters = 10
@@ -96,6 +97,11 @@ val_data = np.memmap('data/val.bin', dtype=np.uint16, mode='r')
 #model 
 config = GPTConfig(vocab_size=vocab_size, **model_overrides)
 model = GPT(config).to(device)
+
+assert total_batch_size % (batch_size * config.block_size * ddp_world_size) == 0
+grad_accumulation_steps = total_batch_size // (batch_size * config.block_size * ddp_world_size)
+if master_process:
+    print(f"batch_size: {batch_size}, grad_accumulation_steps: {grad_accumulation_steps}")
 
 #reference for compile 
 raw_model = model
@@ -172,7 +178,10 @@ def estimate_loss():
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 logits, loss = model(X, Y)
             losses[k] = loss.detach()
-        out[split] = losses.mean()
+        mean = losses.mean()
+        if ddp:
+            dist.all_reduce(mean, op=dist.ReduceOp.AVG)
+        out[split] = mean
     model.train()
     return out
 
@@ -250,14 +259,18 @@ for step in range(max_steps):
   
     #Gradient accumulation
     optimizer.zero_grad(set_to_none=True)
-    loss_accum = 0.0
+    loss_accum = torch.zeros(1, device=device)
     for micro in range(grad_accumulation_steps):
         xb, yb = get_batch('train')
+        if ddp: 
+            model.require_backward_grad_sync = (micro == grad_accumulation_steps - 1)
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             logits, loss = model(xb, yb)
         loss = loss / grad_accumulation_steps
-        loss_accum += loss.item()
+        loss_accum += loss.detach()
         loss.backward()
+    if ddp: 
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
     
@@ -267,12 +280,12 @@ for step in range(max_steps):
 
     if step % log_interval == 0 or step == max_steps - 1:
         dt = t1 - t0
-        tokens = config.block_size * batch_size * grad_accumulation_steps
+        tokens = config.block_size * batch_size * grad_accumulation_steps * ddp_world_size
         tps = tokens / dt
         if master_process:
-            print(f"step {step}: loss {loss_accum:.4f}, tps {tps:.2f}, norm {norm.item():.4f}")
+            print(f"step {step}: loss {loss_accum.item():.4f}, tps {tps:.2f}, norm {norm.item():.4f}")
         if args.wandb:
-            wandb.log({'lr': get_lr(step), 'loss': loss_accum, 'dt': dt, 'tps': tps, 'norm': norm.item()}, step=step)
+            wandb.log({'lr': get_lr(step), 'loss': loss_accum.item(), 'dt': dt, 'tps': tps, 'norm': norm.item()}, step=step)
 
     if step % checkpoint_interval == 0 or step == max_steps - 1:
         if master_process:
@@ -283,3 +296,5 @@ if master_process:
     print(f"Training complete.")
 if args.wandb:
     wandb.finish()
+    if ddp: 
+        dist.destroy_process_group()
