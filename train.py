@@ -46,12 +46,11 @@ parser.add_argument('--wandb', action='store_true',
 args = parser.parse_args()
 
 # train config 
-batch_size = 6
+batch_size = 32
 max_steps = 5000
 eval_interval = 500
 checkpoint_interval = 500
 eval_iters = 20
-learning_rate = 3e-4
 weight_decay = 0.1
 betas = (0.9, 0.95)
 log_interval = 10
@@ -155,7 +154,7 @@ if master_process:
 optimizer = torch.optim.AdamW([
     {'params': decay_params, 'weight_decay': weight_decay},
     {'params': non_decay_params, 'weight_decay': 0.0}
-], lr=learning_rate, betas=betas, eps=1e-8)
+], lr=max_lr, betas=betas, eps=1e-8)
 
 
 def get_batch(split):
@@ -296,5 +295,5 @@ if master_process:
     print(f"Training complete.")
 if args.wandb:
     wandb.finish()
-    if ddp: 
-        dist.destroy_process_group()
+if ddp: 
+    dist.destroy_process_group()

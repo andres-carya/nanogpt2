@@ -1,6 +1,7 @@
 results
 60 steps 
 
+NCCL_P2P_DISABLE=1 is required on RunPod A40 pods!!!!!!
 
 ┌──────────┬────────────────────┬────────┬─────────┬─────────┐
 │   tag    │        what        │ tok/s  │ vs prev │ vs base │
