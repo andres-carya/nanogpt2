@@ -175,7 +175,7 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                logits, loss = model(X, Y)
+                logits, loss, _ = model(X, Y)
             losses[k] = loss.detach()
         mean = losses.mean()
         if ddp:
@@ -264,7 +264,7 @@ for step in range(max_steps):
         if ddp: 
             model.require_backward_grad_sync = (micro == grad_accumulation_steps - 1)
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-            logits, loss = model(xb, yb)
+            logits, loss, _ = model(xb, yb)
         loss = loss / grad_accumulation_steps
         loss_accum += loss.detach()
         loss.backward()
