@@ -76,7 +76,7 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         # no causal mask buffer: scaled_dot_product_attention(is_causal=True) masks internally
 
-    def forward(self, x):
+    def forward(self, x, kv_cache=None):
         B, T, C = x.shape
         hs = C // self.n_head # head_size
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2) # one matmul -> 3 x (B, T, C)
@@ -86,13 +86,24 @@ class MultiHeadAttention(nn.Module):
         k = k.view(B, T, self.n_head, hs).transpose(1, 2) # (B, n_head, T, hs)
         v = v.view(B, T, self.n_head, hs).transpose(1, 2) # (B, n_head, T, hs)
 
+        # kv cache 
+        if kv_cache is not None:
+            k_prev, v_prev = kv_cache
+            k = torch.cat([k_prev, k], dim=2)
+            v = torch.cat([v_prev, v], dim=2)
+        new_cache = (k, v)
+
         # flash attention 
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p = self.attn_dropout.p if self.training else 0)
+        out = F.scaled_dot_product_attention(
+            q, k, v, 
+            is_causal=(q.shape[2] == k.shape[2]), 
+            dropout_p = self.attn_dropout.p if self.training else 0,
+            )
 
         out = out.transpose(1, 2).contiguous().view(B, T, C) # re-assemble heads side by side
         out = self.proj(out) # project back to original embedding size  
         out = self.dropout(out)
-        return out
+        return out, new_cache
 
 class FeedForward(nn.Module): 
     def __init__(self, config):
@@ -119,10 +130,11 @@ class Block(nn.Module):
         self.ln1 = nn.LayerNorm(config.n_embd)
         self.ln2 = nn.LayerNorm(config.n_embd)
 
-    def forward(self, x):
-        x = x + self.sa(self.ln1(x)) # residual connection
+    def forward(self, x, kv_cache=None):
+        attn_out, new_cache = self.sa(self.ln1(x), kv_cache=kv_cache)
+        x = x + attn_out # residual connection
         x = x + self.ffwd(self.ln2(x)) # residual connection
-        return x
+        return x, new_cache
 
 class GPT(nn.Module): 
     def __init__(self, config):
@@ -131,7 +143,7 @@ class GPT(nn.Module):
         self.block_size = config.block_size
         self.token_embedding_table = nn.Embedding(config.vocab_size, config.n_embd)
         self.position_embedding_table = nn.Embedding(config.block_size, config.n_embd)
-        self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
+        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(config.n_embd) # final layer norm
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # GPT-2 has no bias here
         self.lm_head.weight = self.token_embedding_table.weight # tie weights
@@ -179,12 +191,16 @@ class GPT(nn.Module):
                 sd_me[key].copy_(source)
         return model 
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, kv_caches=None, pos_offset=0):
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx) # (B, T, C)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device)) # (T, C)
+        pos_emb = self.position_embedding_table(torch.arange(pos_offset, pos_offset+T, device=idx.device)) # (T, C)
         x = tok_emb + pos_emb # (B, T, C)
-        x = self.blocks(x) # (B, T, C)
+        new_kv_caches = []
+        for i, block in enumerate(self.blocks):
+            x, new_cache = block(x, kv_cache=kv_caches[i] if kv_caches is not None else None)
+            new_kv_caches.append(new_cache)
+        # (B, T, C)
         x = self.ln_f(x) # (B, T, C)
         logits = self.lm_head(x) # (B, T, vocab_size) this is just a matmul 
 
@@ -196,17 +212,37 @@ class GPT(nn.Module):
             targets = targets.view(B*T)
             loss = F.cross_entropy(logits, targets)
 
-        return logits, loss
+        return logits, loss, new_kv_caches
 
-    def generate (self, idx, max_new_tokens):
+    def generate_uncached (self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.block_size:] # crop context to block_size
-            logits, loss = self(idx_cond)
+            logits, loss, _ = self(idx_cond)
             logits = logits[:, -1, :] # focus only on the last time step
             probs = F.softmax(logits, dim=-1) # (B, vocab_size)
             idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
             idx = torch.cat((idx, idx_next), dim=1) # append sampled index to the running sequence
         return idx
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens): 
+        T = idx.shape[1]
+        assert T + max_new_tokens <= self.block_size, "Cannot generate beyond block size"
+
+        #prefill the KV caches with the initial sequence
+        logits, _, caches = self(idx, kv_caches=None, pos_offset=0)
+
+        for _ in range(max_new_tokens):
+            logits = logits[:, -1, :] # focus only on the last time step
+            probs = F.softmax(logits, dim=-1) # (B, vocab_size)
+            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
+            idx = torch.cat((idx, idx_next), dim=1) # append sampled index to the running sequence
+            logits, _, caches = self(idx_next, kv_caches=caches, pos_offset=T)
+            T += 1
+        return idx
+
+
+    
     
 
 if __name__ == "__main__":
